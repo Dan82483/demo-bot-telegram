@@ -1,0 +1,5 @@
+# Единые переводы строк в репозитории: код и текст в LF, .bat для Windows в CRLF
+* text=auto eol=lf
+*.bat text eol=crlf
+*.png binary
+*.log binary

@@ -1,0 +1,25 @@
+# Секреты и доступы — в репозиторий не попадают
+.env
+.env.*
+!.env.example
+credentials.json
+*.pem
+*.key
+
+# Окружение
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Логи и следы локальных прогонов
+*.log
+прогон-*.log
+
+# Редакторы и ОС
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
