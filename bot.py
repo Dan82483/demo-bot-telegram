@@ -14,6 +14,7 @@
 
 Что умеет:
 - меню с кнопками
+- заявки и брони в SQLite (store.py): перезапуск не стирает данные
 - приём заявки: имя, телефон, комментарий, отправка админу с кнопками
 - запись на замер: свободные слоты на три дня, занятый слот забронировать нельзя дважды
 - /stats для владельца, /cancel для выхода из формы
@@ -26,6 +27,9 @@ import os
 import re
 import sys
 from datetime import datetime, timedelta
+from pathlib import Path
+
+import store
 
 try:  # .env рядом с bot.py, чтобы токен не держать в коде
     from dotenv import load_dotenv
@@ -71,7 +75,8 @@ ADMIN_ID = env_int("ADMIN_ID", 0)
 GSHEET_ID = (os.getenv("GSHEET_ID", "") or "").strip()
 
 router = Router()
-# Заявки в памяти процесса. Для демо достаточно, для продакшена - sqlite.
+# Заявки живут в SQLite (store.py) и поднимаются в память при старте:
+# перезапуск бота больше не стирает принятые заявки и брони.
 REQUESTS: dict[int, dict] = {}
 # Счётчики для команды /stats: сколько заявок всего, за сегодня и сколько людей пришло.
 USERS: set[int] = set()
@@ -79,6 +84,17 @@ TOTALS: dict[str, int] = {"requests": 0}
 BY_DAY: dict[str, int] = {}
 # Занятые слоты: один и тот же час нельзя забронировать дважды.
 BOOKED: set[str] = set()
+
+DB_PATH = (os.getenv("DB_PATH", "") or "").strip() or str(Path(__file__).with_name("bot.db"))
+store.DB_PATH = DB_PATH
+store.init()
+_saved = store.load_state()
+REQUESTS.update(_saved["requests"])
+BOOKED.update(_saved["booked"])
+TOTALS["requests"] = _saved["total"]
+BY_DAY.update(_saved["by_day"])
+USERS.update(_saved["users"])
+log.info("Хранилище: %s (заявок %s, занятых слотов %s)", DB_PATH, len(REQUESTS), len(BOOKED))
 
 PHONE_RE = re.compile(r"^\+?[0-9\s\-()]{10,18}$")
 
@@ -333,6 +349,15 @@ async def form_comment(message: Message, state: FSMContext, bot: Bot) -> None:
         "user": message.from_user.id,
         "created": datetime.now().isoformat(timespec="seconds"),
     }
+    # Сначала на диск, потом ответ клиенту: если процесс упадёт, заявка уже сохранена.
+    store.save_request(
+        request_id,
+        kind="заявка",
+        name=data.get("name") or "",
+        phone=data.get("phone") or "",
+        comment=comment,
+        user_id=message.from_user.id,
+    )
     await state.clear()
 
     sheet_append([
@@ -412,9 +437,15 @@ async def booking_phone(message: Message, state: FSMContext, bot: Bot) -> None:
             reply_markup=MAIN_KB,
         )
         return
-    BOOKED.add(slot)
-
     request_id = len(REQUESTS) + 1
+    # Бронь ставим в базе первой: INSERT ... IGNORE сам решает, чей слот.
+    if not store.book_slot(slot, request_id):
+        await message.answer(
+            f"Это время ({slot}) только что заняли. Откройте «Записаться на замер» - покажу свободные.",
+            reply_markup=MAIN_KB,
+        )
+        return
+    BOOKED.add(slot)
     register_request(message.from_user.id)
     REQUESTS[request_id] = {
         "name": data.get("name"),
@@ -422,6 +453,14 @@ async def booking_phone(message: Message, state: FSMContext, bot: Bot) -> None:
         "slot": slot,
         "user": message.from_user.id,
     }
+    store.save_request(
+        request_id,
+        kind="запись",
+        name=data.get("name") or "",
+        phone=phone,
+        slot=slot,
+        user_id=message.from_user.id,
+    )
 
     sheet_append([
         datetime.now().strftime("%d.%m.%Y %H:%M"),
