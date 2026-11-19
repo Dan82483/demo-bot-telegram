@@ -14,15 +14,21 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import sys
+import tempfile
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
 from aiogram.types import CallbackQuery, Chat, Message, User
 
-import bot as demo
+# Тест пишет в отдельную пустую базу, чтобы не трогать bot.db проекта.
+os.environ["DB_PATH"] = str(Path(tempfile.mkdtemp(prefix="demo-bot-test-")) / "test.db")
+
+import bot as demo  # noqa: E402 - переменная окружения должна быть задана до импорта
 
 
 # ---------- Поддельная сессия Telegram ----------
@@ -355,8 +361,38 @@ async def t_env_int() -> None:
     os.environ.pop("ADMIN_ID", None)
 
 
+async def t_storage() -> None:
+    """Главная проверка после доработки: данные переживают перезапуск бота."""
+    reset()
+    check("Хранилище: файл базы создан при старте", Path(demo.DB_PATH).exists(), demo.DB_PATH)
+
+    demo.store.save_request(
+        101, kind="заявка", name="Пётр", phone="+7 900 000-00-01", comment="тест", user_id=5
+    )
+    demo.store.save_request(
+        102, kind="запись", name="Анна", phone="+7 900 000-00-02", slot="2099-01-01 10:00", user_id=6
+    )
+
+    first = demo.store.book_slot("2099-01-01 10:00", 102)
+    second = demo.store.book_slot("2099-01-01 10:00", 103)
+    check("Хранилище: слот закрепляется за первым, второму отказ", first and not second, f"{first} / {second}")
+
+    # Полная перезагрузка состояния - так бот поднимается после падения процесса.
+    state = demo.store.load_state()
+    check("Хранилище: заявка читается заново", state["requests"].get(101, {}).get("name") == "Пётр", str(state["requests"].get(101)))
+    check("Хранилище: запись на замер читается заново", state["requests"].get(102, {}).get("slot") == "2099-01-01 10:00")
+    check("Хранилище: занятый слот попадает в состояние", "2099-01-01 10:00" in state["booked"], str(state["booked"]))
+    check("Хранилище: счётчик заявок берётся из базы", state["total"] >= 2, f"их {state['total']}")
+    check("Хранилище: люди в боте считаются по базе", {5, 6} <= state["users"], str(sorted(state["users"])))
+
+    # Повторное сохранение того же id не размножает заявки.
+    demo.store.save_request(101, kind="заявка", name="Пётр", phone="+7 900 000-00-01", comment="тест", user_id=5)
+    check("Хранилище: повторная запись не создаёт дубль", len(demo.store.load_state()["requests"]) == 2)
+
+
 SCENARIOS = [
     ("Обработчики", t_handlers),
+    ("Хранилище SQLite", t_storage),
     ("Настройки", t_env_int),
     ("Проверка телефона", t_phone),
     ("Слоты", t_slots),
